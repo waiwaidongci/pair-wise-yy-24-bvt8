@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from database import DomainError, RadioDB
+from database import ConflictError, DomainError, RadioDB
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("RADIO_DB", str(BASE / "radio.db"))
@@ -39,6 +39,13 @@ class Handler(BaseHTTPRequestHandler):
             raise DomainError("JSON 请求体必须是对象")
         return value
 
+    def _domain_error(self, exc: DomainError) -> None:
+        if isinstance(exc, ConflictError):
+            payload = {"ok": False, "error": str(exc), "conflict": True, "day": exc.payload}
+            self._json(409, payload)
+        else:
+            self._json(400, {"ok": False, "error": str(exc)})
+
     def do_GET(self):
         parsed = urlparse(self.path)
         try:
@@ -59,13 +66,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"exceptions": self.db.get_exceptions(date)})
             self._json(404, {"ok": False, "error": "接口不存在"})
         except DomainError as exc:
-            self._json(400, {"ok": False, "error": str(exc)})
+            self._domain_error(exc)
 
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
             body = self._body()
             parts = [p for p in parsed.path.split("/") if p]
+            version = body.get("expected_version")
+            expected = int(version) if version not in (None, "") else None
             if parsed.path == "/api/programs":
                 program_id = self.db.add_program(
                     str(body.get("title", "")), str(body.get("kind", "music")),
@@ -77,9 +86,10 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/schedule":
                 slot_id = self.db.schedule_slot(
                     str(body.get("air_date", "")), str(body.get("start_time", "")),
-                    int(body.get("program_id", 0)), str(body.get("region", "")),
+                    int(body.get("program_id", 0)), str(body.get("region", "")), expected,
                 )
-                return self._json(201, {"ok": True, "id": slot_id, "slot": self.db.get_slot(slot_id)})
+                return self._json(201, {"ok": True, "id": slot_id, "slot": self.db.get_slot(slot_id),
+                                        "version": self.db.day_view(str(body.get("air_date", "")))["version"]})
             if parsed.path == "/api/playout":
                 log_id = self.db.record_playout(
                     int(body.get("slot_id", 0)), str(body.get("actual_start", "")),
@@ -91,13 +101,24 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/reconcile":
                 return self._json(200, {"ok": True, "exceptions": self.db.reconcile_date(str(body.get("date", "")))})
             if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "replace":
-                return self._json(200, {"ok": True, "slot": self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)))})
+                slot = self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)), expected)
+                return self._json(200, {"ok": True, "slot": slot,
+                                        "version": self.db.day_view(slot["broadcast_day"])["version"]})
+            if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "move":
+                target_version = body.get("expected_target_version")
+                slot = self.db.move_slot(
+                    int(parts[2]), str(body.get("air_date", "")), str(body.get("start_time", "")),
+                    expected,
+                    int(target_version) if target_version not in (None, "") else None,
+                )
+                return self._json(200, {"ok": True, "slot": slot,
+                                        "version": self.db.day_view(slot["broadcast_day"])["version"]})
             if len(parts) == 4 and parts[:2] == ["api", "programs"] and parts[3] == "regions":
                 self.db.authorize_region(int(parts[2]), str(body.get("region", "")))
                 return self._json(201, {"ok": True})
             self._json(404, {"ok": False, "error": "接口不存在"})
         except (DomainError, ValueError) as exc:
-            self._json(400, {"ok": False, "error": str(exc)})
+            self._domain_error(exc)
 
 
 def main() -> None:
