@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>电台排程</title>
+<style>
+body{font:15px system-ui;max-width:1100px;margin:24px auto;padding:0 16px;background:#f7f7f5;color:#222}
+section{background:white;padding:16px;margin:12px 0;border:1px solid #ddd;border-radius:10px}
+input,select,button{padding:7px;margin:3px;border:1px solid #bbb;border-radius:6px}
+button{cursor:pointer;background:#16324f;color:white}pre{white-space:pre-wrap;max-height:360px;overflow:auto}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid input{width:90%}
+</style>
+<h1>电台播出与版权窗口排程</h1>
+<section><h2>当前计划</h2><button onclick="load()">刷新</button><pre id="state"></pre></section>
+<section><h2>新建节目</h2><div class="grid">
+<input id="title" placeholder="节目名"><select id="kind"><option>music</option><option>ad</option><option>talk</option><option>live</option></select>
+<input id="duration" type="number" value="30" placeholder="分钟"><input id="start" value="2026-01-01"><input id="end" value="2026-12-31">
+<input id="region" value="华东"><input id="sponsor" placeholder="赞助商，可空"><input id="cooldown" type="number" value="0" placeholder="冷却分钟">
+</div><button onclick="addProgram()">创建并授权地区</button></section>
+<section><h2>排期 / 替换 / 实播对账</h2>
+<div class="grid"><input id="airdate" value="2026-09-28"><input id="starttime" value="12:00"><input id="pid" type="number" placeholder="节目 ID">
+<input id="sid" type="number" placeholder="排期 ID"><input id="newpid" type="number" placeholder="替换节目 ID"><input id="actualstart" value="12:00">
+<input id="actualduration" type="number" value="30" placeholder="实播分钟"><input id="actualpid" type="number" placeholder="实播节目 ID，可空"></div>
+<button onclick="schedule()">排期</button><button onclick="replace()">替换</button><button onclick="playout()">记录实播</button><button onclick="reconcile()">对账</button><pre id="result"></pre></section>
+<script>
+const api=async(url,body)=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();out(j);return j};
+const out=x=>document.querySelector('#result').textContent=JSON.stringify(x,null,2);
+async function load(){document.querySelector('#state').textContent=JSON.stringify(await (await fetch('/api/state')).json(),null,2)}
+function addProgram(){api('/api/programs',{title:title.value,kind:kind.value,duration_minutes:+duration.value,start_date:start.value,end_date:end.value,region:region.value,regions:[region.value],sponsor:sponsor.value||null,cooldown_minutes:+cooldown.value})}
+function schedule(){api('/api/schedule',{air_date:airdate.value,start_time:starttime.value,program_id:+pid.value,region:region.value})}
+function replace(){api('/api/slots/'+sid.value+'/replace',{new_program_id:+newpid.value})}
+function playout(){api('/api/playout',{slot_id:+sid.value,actual_start:actualstart.value,actual_duration_minutes:+actualduration.value,actual_program_id:actualpid.value?+actualpid.value:null})}
+function reconcile(){api('/api/reconcile',{date:airdate.value})}
+load();
+</script>
+</html>
