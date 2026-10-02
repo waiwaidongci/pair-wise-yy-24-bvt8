@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from database import DomainError, RadioDB
+from database import ConflictError, DomainError, RadioDB
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("RADIO_DB", str(BASE / "radio.db"))
@@ -39,6 +39,24 @@ class Handler(BaseHTTPRequestHandler):
             raise DomainError("JSON 请求体必须是对象")
         return value
 
+    @staticmethod
+    def _base_version(body: dict) -> int | None:
+        value = body.get("base_version")
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise DomainError("base_version 必须是整数") from exc
+
+    def _conflict(self, exc: ConflictError) -> None:
+        data = json.dumps({"ok": False, "error": str(exc), "state": exc.state}, ensure_ascii=False).encode("utf-8")
+        self.send_response(409)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         try:
@@ -52,12 +70,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/state":
                 return self._json(200, self.db.snapshot())
+            if parsed.path == "/api/plan":
+                date = parse_qs(parsed.query).get("date", [""])[0]
+                if not date:
+                    raise DomainError("缺少 date 参数")
+                return self._json(200, {"ok": True, **self.db._plan_state(date)})
             if parsed.path == "/api/reconciliation":
                 date = parse_qs(parsed.query).get("date", [""])[0]
                 if not date:
                     raise DomainError("缺少 date 参数")
                 return self._json(200, {"exceptions": self.db.get_exceptions(date)})
             self._json(404, {"ok": False, "error": "接口不存在"})
+        except ConflictError as exc:
+            self._conflict(exc)
         except DomainError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
 
@@ -78,6 +103,7 @@ class Handler(BaseHTTPRequestHandler):
                 slot_id = self.db.schedule_slot(
                     str(body.get("air_date", "")), str(body.get("start_time", "")),
                     int(body.get("program_id", 0)), str(body.get("region", "")),
+                    self._base_version(body),
                 )
                 return self._json(201, {"ok": True, "id": slot_id, "slot": self.db.get_slot(slot_id)})
             if parsed.path == "/api/playout":
@@ -91,11 +117,23 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/reconcile":
                 return self._json(200, {"ok": True, "exceptions": self.db.reconcile_date(str(body.get("date", "")))})
             if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "replace":
-                return self._json(200, {"ok": True, "slot": self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)))})
+                return self._json(200, {
+                    "ok": True,
+                    "slot": self.db.replace_slot(int(parts[2]), int(body.get("new_program_id", 0)),
+                                                 self._base_version(body)),
+                })
+            if len(parts) == 4 and parts[:2] == ["api", "slots"] and parts[3] == "move":
+                return self._json(200, {
+                    "ok": True,
+                    "slot": self.db.move_slot(int(parts[2]), str(body.get("air_date", "")),
+                                              str(body.get("start_time", "")), self._base_version(body)),
+                })
             if len(parts) == 4 and parts[:2] == ["api", "programs"] and parts[3] == "regions":
                 self.db.authorize_region(int(parts[2]), str(body.get("region", "")))
                 return self._json(201, {"ok": True})
             self._json(404, {"ok": False, "error": "接口不存在"})
+        except ConflictError as exc:
+            self._conflict(exc)
         except (DomainError, ValueError) as exc:
             self._json(400, {"ok": False, "error": str(exc)})
 

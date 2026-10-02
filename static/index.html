@@ -8,6 +8,7 @@ section{background:white;padding:16px;margin:12px 0;border:1px solid #ddd;border
 input,select,button{padding:7px;margin:3px;border:1px solid #bbb;border-radius:6px}
 button{cursor:pointer;background:#16324f;color:white}pre{white-space:pre-wrap;max-height:360px;overflow:auto}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid input{width:90%}
+.conflict{background:#fdecea;border:1px solid #e5b6b0;padding:8px;border-radius:6px;margin:6px 0}
 </style>
 <h1>电台播出与版权窗口排程</h1>
 <section><h2>当前计划</h2><button onclick="load()">刷新</button><pre id="state"></pre></section>
@@ -16,18 +17,46 @@ button{cursor:pointer;background:#16324f;color:white}pre{white-space:pre-wrap;ma
 <input id="duration" type="number" value="30" placeholder="分钟"><input id="start" value="2026-01-01"><input id="end" value="2026-12-31">
 <input id="region" value="华东"><input id="sponsor" placeholder="赞助商，可空"><input id="cooldown" type="number" value="0" placeholder="冷却分钟">
 </div><button onclick="addProgram()">创建并授权地区</button></section>
-<section><h2>排期 / 替换 / 实播对账</h2>
+<section><h2>排期 / 移动 / 替换 / 实播对账</h2>
+<p>播出日按早上六点切分：凌晨 00:00–05:59 的档口归入前一天播出日。跨零点节目按整条时间轴校验。</p>
 <div class="grid"><input id="airdate" value="2026-09-28"><input id="starttime" value="12:00"><input id="pid" type="number" placeholder="节目 ID">
-<input id="sid" type="number" placeholder="排期 ID"><input id="newpid" type="number" placeholder="替换节目 ID"><input id="actualstart" value="12:00">
+<input id="sid" type="number" placeholder="排期 ID"><input id="newpid" type="number" placeholder="替换节目 ID"><input id="newairdate" placeholder="移动到日期，如 2026-09-28">
+<input id="newstarttime" placeholder="移动到时间，如 23:30"><input id="actualstart" value="12:00">
 <input id="actualduration" type="number" value="30" placeholder="实播分钟"><input id="actualpid" type="number" placeholder="实播节目 ID，可空"></div>
-<button onclick="schedule()">排期</button><button onclick="replace()">替换</button><button onclick="playout()">记录实播</button><button onclick="reconcile()">对账</button><pre id="result"></pre></section>
+<button onclick="schedule()">排期</button><button onclick="move()">移动</button><button onclick="replace()">替换</button>
+<button onclick="playout()">记录实播</button><button onclick="reconcile()">对账</button>
+<div id="conflict" class="conflict" style="display:none"></div><pre id="result"></pre></section>
 <script>
-const api=async(url,body)=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();out(j);return j};
+let versions = {};
+const api=async(url,body)=>{
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();
+  if(r.status===409){
+    document.querySelector('#conflict').style.display='block';
+    document.querySelector('#conflict').textContent='冲突：'+j.error+'\n对方已改：'+JSON.stringify(j.state,null,2);
+  } else { document.querySelector('#conflict').style.display='none'; }
+  out(j); return j;
+};
 const out=x=>document.querySelector('#result').textContent=JSON.stringify(x,null,2);
-async function load(){document.querySelector('#state').textContent=JSON.stringify(await (await fetch('/api/state')).json(),null,2)}
+function broadcastDay(dateStr, timeStr){
+  const [h,m]=timeStr.split(':').map(Number);
+  const d=new Date(dateStr+'T00:00:00');
+  if(h*60+m < 360){ d.setDate(d.getDate()-1); }
+  return d.toISOString().slice(0,10);
+}
+function baseVersionFor(dateStr, timeStr){
+  const bd = broadcastDay(dateStr, timeStr);
+  return Object.prototype.hasOwnProperty.call(versions, bd) ? versions[bd] : 0;
+}
+async function load(){
+  const j=await (await fetch('/api/state')).json();
+  versions = j.versions || {};
+  document.querySelector('#state').textContent=JSON.stringify(j,null,2);
+}
 function addProgram(){api('/api/programs',{title:title.value,kind:kind.value,duration_minutes:+duration.value,start_date:start.value,end_date:end.value,region:region.value,regions:[region.value],sponsor:sponsor.value||null,cooldown_minutes:+cooldown.value})}
-function schedule(){api('/api/schedule',{air_date:airdate.value,start_time:starttime.value,program_id:+pid.value,region:region.value})}
-function replace(){api('/api/slots/'+sid.value+'/replace',{new_program_id:+newpid.value})}
+function schedule(){api('/api/schedule',{air_date:airdate.value,start_time:starttime.value,program_id:+pid.value,region:region.value,base_version:baseVersionFor(airdate.value,starttime.value)})}
+function move(){api('/api/slots/'+sid.value+'/move',{air_date:newairdate.value,start_time:newstarttime.value,base_version:baseVersionFor(newairdate.value,newstarttime.value)})}
+function replace(){api('/api/slots/'+sid.value+'/replace',{new_program_id:+newpid.value,base_version:versions[broadcastDay(airdate.value,starttime.value)] ?? 0})}
 function playout(){api('/api/playout',{slot_id:+sid.value,actual_start:actualstart.value,actual_duration_minutes:+actualduration.value,actual_program_id:actualpid.value?+actualpid.value:null})}
 function reconcile(){api('/api/reconcile',{date:airdate.value})}
 load();
